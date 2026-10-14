@@ -51,6 +51,15 @@ sudo ./install.sh --enable                    # daily backup ~02:30, restore tes
 
 > **Save the password** in `/etc/restic-backup-kit/password` somewhere outside the server. Restic encrypts everything; without the password nobody can restore the data, including you.
 
+### Uninstall
+
+```bash
+sudo ./uninstall.sh                 # removes scripts and timers, keeps /etc/restic-backup-kit
+sudo ./uninstall.sh --purge-config  # also deletes the config and password (asks for confirmation)
+```
+
+The backup repository itself is never touched by the uninstaller.
+
 ## Configuration
 
 Everything lives in [`/etc/restic-backup-kit/backup.env`](config/backup.env.example):
