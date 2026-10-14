@@ -1,5 +1,7 @@
 # restic-backup-kit
 
+[![tests](https://github.com/francisco-vilaca/restic-backup-kit/actions/workflows/tests.yml/badge.svg)](https://github.com/francisco-vilaca/restic-backup-kit/actions/workflows/tests.yml) ![license](https://img.shields.io/badge/license-MIT-blue)
+
 Automated, encrypted [restic](https://restic.net/) backups for Linux servers, with the part most setups skip: **regularly proving the backup can actually be restored.**
 
 - **`restic-backup`**: one backup + retention cycle, driven by a single config file. Daily via a systemd timer.
