@@ -1,0 +1,12 @@
+[Unit]
+Description=restic backup (restic-backup-kit)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/restic-backup
+Nice=10
+IOSchedulingClass=idle
+# restic keeps a local cache to speed up incremental backups
+Environment=RESTIC_CACHE_DIR=/var/cache/restic

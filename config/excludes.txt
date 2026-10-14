@@ -1,0 +1,9 @@
+# One pattern per line (restic --exclude-file syntax)
+/home/*/.cache
+/root/.cache
+**/node_modules
+**/.venv
+**/__pycache__
+*.tmp
+*.swp
+/var/www/**/cache/*

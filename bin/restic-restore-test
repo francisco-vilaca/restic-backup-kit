@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# restic-restore-test: prove the latest backup can actually be restored.
+# Part of restic-backup-kit (MIT) - https://github.com/francisco-vilaca/restic-backup-kit
+#
+# 1. checks the latest snapshot is recent enough
+# 2. restores a random sample of files to a temporary directory
+# 3. compares SHA-256 of each restored file with the live file (when the live
+#    file has not changed since the snapshot)
+# 4. verifies a random subset of the repository's data with `restic check`
+#
+# Exit 0 = restore verified, 1 = problem found, 2 = configuration error.
+
+set -Eeuo pipefail
+
+VERSION="0.1.0"
+CONFIG="${RESTIC_KIT_CONFIG:-/etc/restic-backup-kit/backup.env}"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+case ${1:-} in
+  --version) echo "restic-restore-test $VERSION"; exit 0 ;;
+  -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") ;;
+  *) echo "unknown option: $1" >&2; exit 2 ;;
+esac
+
+[[ -r $CONFIG ]] || { echo "config not found or not readable: $CONFIG" >&2; exit 2; }
+set -a
+# shellcheck disable=SC1090
+. "$CONFIG"
+set +a
+: "${RESTIC_REPOSITORY:?set RESTIC_REPOSITORY in $CONFIG}"
+for cmd in restic jq shuf sha256sum; do
+  command -v "$cmd" >/dev/null || { echo "$cmd is required" >&2; exit 2; }
+done
+
+SAMPLE=${RESTORE_TEST_FILES:-20}
+MAX_AGE_HOURS=${RESTORE_TEST_MAX_AGE_HOURS:-26}
+CHECK_SUBSET=${RESTORE_TEST_CHECK_SUBSET:-2%}
+HC_URL=${RESTORE_TEST_HEALTHCHECK_URL:-}
+
+PROBLEMS=()
+problem() { PROBLEMS+=("$*"); log "PROBLEM: $*"; }
+
+hc_ping() {
+  [[ -n $HC_URL ]] || return 0
+  curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "${2:-}" "${HC_URL%/}$1" 2>/dev/null \
+    || log "warning: healthcheck ping failed"
+}
+
+finish() {
+  if ((${#PROBLEMS[@]})); then
+    log "RESTORE TEST FAILED (${#PROBLEMS[@]} problem(s))"
+    hc_ping /fail "$(printf '%s\n' "${PROBLEMS[@]}")"
+    exit 1
+  fi
+  log "RESTORE TEST PASSED"
+  hc_ping "" "restore test ok"
+  exit 0
+}
+
+ERR_FILE=$(mktemp)
+target=""
+trap 'rm -rf "$ERR_FILE" ${target:+"$target"}' EXIT
+
+hc_ping /start
+log "restic-restore-test $VERSION: repository $RESTIC_REPOSITORY"
+
+# --- 1. latest snapshot and its age -------------------------------------------------
+if ! snapshot_json=$(restic snapshots --tag restic-backup-kit --latest 1 --json 2>"$ERR_FILE"); then
+  problem "cannot list snapshots: $(tail -1 "$ERR_FILE")"
+  finish
+fi
+snap_id=$(jq -r 'sort_by(.time) | last | .id // empty' <<<"$snapshot_json")
+snap_time=$(jq -r 'sort_by(.time) | last | .time // empty' <<<"$snapshot_json")
+if [[ -z $snap_id ]]; then
+  problem "repository has no snapshots"
+  finish
+fi
+snap_epoch=$(date -d "$snap_time" +%s)
+age_h=$((($(date +%s) - snap_epoch) / 3600))
+log "latest snapshot ${snap_id:0:8} from $snap_time (${age_h}h ago)"
+if ((age_h >= MAX_AGE_HOURS)); then
+  problem "latest snapshot is ${age_h}h old (limit ${MAX_AGE_HOURS}h): backups have stopped"
+fi
+
+# --- 2. restore a random sample -----------------------------------------------------
+mapfile -t files < <(restic ls --json "$snap_id" \
+  | jq -r 'select(.struct_type == "node" and .type == "file" and .size > 0) | .path' \
+  | shuf -n "$SAMPLE")
+if ((${#files[@]} == 0)); then
+  problem "snapshot ${snap_id:0:8} contains no files"
+  finish
+fi
+
+target=$(mktemp -d "${TMPDIR:-/tmp}/restore-test.XXXXXX")
+include_args=()
+for f in "${files[@]}"; do include_args+=(--include "$f"); done
+
+start=$(date +%s)
+if ! restic restore "$snap_id" --target "$target" "${include_args[@]}" >"$ERR_FILE" 2>&1; then
+  problem "restic restore failed: $(tail -3 "$ERR_FILE" | tr '\n' ' ')"
+fi
+elapsed=$(($(date +%s) - start))
+
+# --- 3. verify ----------------------------------------------------------------------
+verified=0 changed=0 bytes=0
+for f in "${files[@]}"; do
+  restored="$target$f"
+  if [[ ! -f $restored ]]; then
+    problem "not restored: $f"
+    continue
+  fi
+  bytes=$((bytes + $(stat -c %s "$restored")))
+  if [[ -f $f && $(stat -c %Y "$f") -lt $snap_epoch ]]; then
+    if [[ $(sha256sum <"$f") == "$(sha256sum <"$restored")" ]]; then
+      verified=$((verified + 1))
+    else
+      problem "content differs from the live file although it has not changed since the backup: $f"
+    fi
+  else
+    changed=$((changed + 1)) # modified or deleted after the snapshot: restore-only check
+  fi
+done
+log "restored ${#files[@]} file(s), $((bytes / 1024)) KiB in ${elapsed}s: $verified identical to the live file, $changed changed since the snapshot (restore-only)"
+
+# --- 4. repository data integrity ---------------------------------------------------
+if [[ $CHECK_SUBSET != 0 && $CHECK_SUBSET != "0%" ]]; then
+  log "verifying repository data (read-data-subset=$CHECK_SUBSET)"
+  if ! restic check --read-data-subset="$CHECK_SUBSET" >"$ERR_FILE" 2>&1; then
+    problem "restic check found errors: $(grep -iE 'error|fatal' "$ERR_FILE" | head -3 | tr '\n' ' ')"
+  fi
+fi
+
+finish

@@ -1,0 +1,11 @@
+[Unit]
+Description=restic restore test (restic-backup-kit)
+Wants=network-online.target
+After=network-online.target restic-backup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/restic-restore-test
+Nice=10
+IOSchedulingClass=idle
+Environment=RESTIC_CACHE_DIR=/var/cache/restic
